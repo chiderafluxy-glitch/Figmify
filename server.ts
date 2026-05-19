@@ -3,7 +3,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import Stripe from 'stripe';
-import puppeteer from 'puppeteer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -228,103 +227,102 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
 
 // ========== CONVERSION ENDPOINTS ==========
 
-// Convert HTML to Figma
+// Convert HTML to screenshot using Browserless
 app.post('/api/convert', async (req: Request, res: Response) => {
   try {
+    const { html, width = 1280, height = 800, name = 'Frame' } = req.body;
     const apiKey = req.headers['x-api-key'] as string;
-
+    
     if (!apiKey) {
       return res.status(401).json({ error: 'API key required' });
     }
-
-    const { html, width = 1280, height = 800, name = 'Converted Design' } = req.body;
-
-    if (!html) {
-      return res.status(400).json({ error: 'HTML required' });
-    }
-
-    // Get API key record
-    const { data: keyRecord } = await supabase
+    
+    // Get user from API key
+    const { data: keyData, error: keyError } = await supabase
       .from('api_keys')
-      .select('id, plan')
-      .eq('key', apiKey)
+      .select('id, user_id, plan')
+      .eq('api_key', apiKey)
       .single();
-
-    if (!keyRecord) {
-      return res.status(401).json({
-        error: 'invalid_api_key',
-        message: 'Provide a valid X-API-Key header',
-      });
+    
+    if (keyError || !keyData) {
+      return res.status(401).json({ error: 'Invalid API key' });
     }
-
-    // Check usage
-    const firstDayOfMonth = new Date();
-    firstDayOfMonth.setDate(1);
-    const monthStr = firstDayOfMonth.toISOString().split('T')[0];
-
-    const { data: usageData } = await supabase
+    
+    // Check monthly usage
+    const now = new Date();
+    const currentMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+    
+    let { data: usageData } = await supabase
       .from('usage')
-      .select('count, overage_count')
-      .eq('api_key_id', keyRecord.id)
-      .eq('month', monthStr)
+      .select('count')
+      .eq('api_key_id', keyData.id)
+      .eq('month', currentMonth)
       .single();
-
-    const limit = keyRecord.plan === 'pro' ? 2500 : 50;
-    const currentUsage = usageData?.count || 0;
-
-    if (currentUsage >= limit && keyRecord.plan === 'free') {
-      return res.status(429).json({
-        error: 'monthly_limit_reached',
-        message: 'You have used 50 of 50 free conversions. Upgrade to Pro at figmify.com/pricing',
-        upgrade_url: 'https://figmify.com/pricing',
-      });
+    
+    const limit = keyData.plan === 'pro' ? 2500 : 50;
+    const currentCount = usageData?.count || 0;
+    
+    if (currentCount >= limit) {
+      return res.status(429).json({ error: `Monthly limit of ${limit} conversions reached` });
     }
-
-    // Perform conversion using Puppeteer
-    const browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
-
-    const page = await browser.newPage();
-    await page.setViewport({ width, height });
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-
-    // Simple conversion - return mock data for now
-    // In production, you'd integrate @figit/dom-to-figma here
-    const clipboardData = Buffer.from(
-      JSON.stringify({
-        type: 'design',
-        name,
-        width,
-        height,
-        html: html.substring(0, 500), // Truncate for clipboard
+    
+    // Call Browserless API
+    const browserlessKey = process.env.BROWSERLESS_API_KEY;
+    if (!browserlessKey) {
+      return res.status(500).json({ error: 'Browserless API key not configured' });
+    }
+    
+    const fetch = (await import('node-fetch')).default;
+    const browserlessRes = await fetch(`https://chrome.browserless.io/content?token=${browserlessKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        html: html,
+        options: {
+          width: parseInt(String(width)),
+          height: parseInt(String(height)),
+          deviceScaleFactor: 2,
+          waitFor: 1000
+        }
       })
-    ).toString('base64');
-
-    await browser.close();
-
-    // Update usage
+    });
+    
+    if (!browserlessRes.ok) {
+      const errorText = await browserlessRes.text();
+      throw new Error(`Browserless error: ${browserlessRes.status} ${errorText}`);
+    }
+    
+    const screenshotBuffer = await browserlessRes.buffer();
+    const base64Screenshot = screenshotBuffer.toString('base64');
+    
+    // Increment usage
+    if (usageData) {
+      await supabase
+        .from('usage')
+        .update({ count: currentCount + 1 })
+        .eq('api_key_id', keyData.id)
+        .eq('month', currentMonth);
+    } else {
+      await supabase
+        .from('usage')
+        .insert({ api_key_id: keyData.id, month: currentMonth, count: 1 });
+    }
+    
+    // Log success
     await supabase
-      .from('usage')
-      .update({ count: currentUsage + 1 })
-      .eq('api_key_id', keyRecord.id)
-      .eq('month', monthStr);
-
-    return res.json({
+      .from('conversion_logs')
+      .insert({ api_key_id: keyData.id, html_length: html.length, success: true });
+    
+    res.json({
       success: true,
-      clipboardData,
-      usage: {
-        current_month_count: currentUsage + 1,
-        included_limit: limit,
-        remaining: Math.max(0, limit - (currentUsage + 1)),
-      },
+      message: 'Rendered screenshot. In Figma, paste as image (⌘+V)',
+      screenshotBase64: base64Screenshot,
+      width, height, name
     });
-  } catch (error) {
+    
+  } catch (error: any) {
     console.error('Conversion error:', error);
-    res.status(500).json({
-      error: 'conversion_failed',
-      message: 'Could not convert HTML. Check that HTML is valid and not too complex.',
-    });
+    res.status(500).json({ error: error.message || 'Conversion failed' });
   }
 });
 

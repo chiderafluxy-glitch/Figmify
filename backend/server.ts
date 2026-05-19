@@ -477,9 +477,4 @@ app.get('*', (req: Request, res: Response) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`\n✅ Figmify backend running on port ${PORT}`);
-  console.log(`🌐 Frontend: http://localhost:${PORT}`);
-  console.log(`🔧 API: http://localhost:${PORT}/api\n`);
-});
+export default app;

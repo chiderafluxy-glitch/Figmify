@@ -27,12 +27,15 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '');
 app.use(cors());
 app.use(express.json());
 
-// For Vercel, adjust paths
-const isVercel = process.env.VERCEL === '1';
-const staticDir = isVercel ? path.join(__dirname, 'frontend', 'dist') : path.join(__dirname, 'dist');
+// Handle static files from .next (Next.js build output)
+app.use(express.static(path.join(__dirname, '.next')));
 
-// Serve static files
-app.use(express.static(staticDir));
+// For non-API routes, serve index.html from Next.js build
+app.get('*', (req: Request, res: Response) => {
+  if (!req.path.startsWith('/api')) {
+    res.sendFile(path.join(__dirname, '.next', 'index.html'));
+  }
+});
 
 // ========== AUTH ENDPOINTS ==========
 
@@ -471,10 +474,5 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
 });
 
 // ========== FALLBACK TO SPA ==========
-
-// Serve React app for all unmatched routes
-app.get('*', (req: Request, res: Response) => {
-  res.sendFile(path.join(staticDir, 'index.html'));
-});
 
 export default app;

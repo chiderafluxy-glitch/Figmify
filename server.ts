@@ -48,7 +48,7 @@ app.post('/api/auth/signup', async (req: Request, res: Response) => {
     }
 
     // Create user in Supabase Auth
-    const { data: authData, error: authError } = await supabase.auth.signUpWithPassword({
+    const { data: authData, error: authError } = await supabase.auth.signUp({
       email,
       password,
     });
@@ -450,8 +450,8 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
       const customerId = session.customer;
 
       // Get user ID from customer metadata
-      const customer = await stripe.customers.retrieve(customerId);
-      const userId = (customer.metadata as any)?.userId;
+      const customer = await stripe.customers.retrieve(customerId) as Stripe.Customer;
+      const userId = customer?.metadata?.user_id || null;
 
       if (userId) {
         await supabase
